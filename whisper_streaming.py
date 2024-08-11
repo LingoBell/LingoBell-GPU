@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 import soundfile
+import requests
 import io
 from whisper_online import *
 
@@ -53,32 +54,50 @@ class ServerProcessor:
         self.min_chunk = min_chunk
         self.last_end = None
 
-    async def process_audio_stream(self, websocket):
+    async def process_audio_stream(self, websocket, chat_room_id):
         self.online_asr_proc.init()
+        user_id = None
         while True:
             try:
                 data = await websocket.recv()
 
-                if not data:
-                    logger.error("Received empty data, skipping processing")
-                    continue
+                if isinstance(data, str):
+                    try:
+                        message = json.loads(data)
+                        if message.get("type") == "language":
+                           user_id = message.get("userId")
+                           logger.info(f"Received userId: {user_id}")
+                           logger.info(f"Received language info: {message}")
+                           native_language = message.get("nativeLanguage")
+                           learning_languages = message.get("learningLanguages")
+                           logger.info(f"Native Language: {native_language}")
+                           logger.info(f"Learning Languages: {learning_languages}")
+                    except json.JSONDecodeError:
+                        logger.error("Received invalid JSON message")
+                else:
+                    if not data:
+                        logger.error("Received empty data, skipping processing")
+                        continue
 
-                # 수신된 데이터를 wav 형식으로 처리
-                audio_wav_io = io.BytesIO(data)
-                audio_wav_io.seek(0)
-                logger.info(f"Received audio data of size: {len(data)} bytes")
+                    # 수신된 데이터를 wav 형식으로 처리
+                    audio_wav_io = io.BytesIO(data)
+                    audio_wav_io.seek(0)
+                    logger.info(f"Received audio data of size: {len(data)} bytes")
 
-                try:
-                    # librosa로 오디오 데이터를 처리합니다.
-                    audio_data, _ = librosa.load(audio_wav_io, sr=SAMPLING_RATE, dtype=np.float32)
-                    self.online_asr_proc.insert_audio_chunk(audio_data)
-                    o = online.process_iter()
-                    transcription = self.format_output_transcript(o)
+                    try:
+                        # librosa로 오디오 데이터를 처리합니다.
+                        audio_data, _ = librosa.load(audio_wav_io, sr=SAMPLING_RATE, dtype=np.float32)
+                        self.online_asr_proc.insert_audio_chunk(audio_data)
+                        o = online.process_iter()
+                        transcription = self.format_output_transcript(o)
                     
-                    if transcription:
-                        await websocket.send(transcription)
-                except Exception as e:
-                    logger.error(f"Error processing audio stream: {str(e)}")
+                        if transcription and user_id:
+                            logger.info(f"Transcription for user {user_id}: {transcription}")
+                            await websocket.send(transcription)
+                            
+                            self.send_stt_to_backend(user_id, chat_room_id, transcription)
+                    except Exception as e:
+                        logger.error(f"Error processing audio stream: {str(e)}")
             except websockets.ConnectionClosed:
                 break
             except Exception as e:
@@ -93,10 +112,31 @@ class ServerProcessor:
             return json.dumps({"transcription": o[2]})
         return None
 
+    def send_stt_to_backend(self, user_id, chat_room_id, transcription):
+       try:
+           payload = {
+               "userId": user_id,
+               "chatRoomId": chat_room_id,
+               "stt_text": transcription
+           }
+           response = requests.post("http://127.0.0.1:8000/process_stt_and_translate", json=payload)
+           if response.status_code == 200:
+               logger.info(f"STT result successfully sent to backend for user {use_id} in chat room {chat_room_id}")
+           else:
+               logger.error(f"Failed to send STT result to backend: {response.status_code}")
+       
+       except Exception as e:
+           logger.error(f"Error sending STT result to backend: {e}")
+
 # WebSocket 서버 처리
 async def handle_client(websocket, path):
     processor = ServerProcessor(online_asr_proc=online, min_chunk=min_chunk)
-    await processor.process_audio_stream(websocket)
+    
+    # chat_room_id를 경로에서 추출
+    chat_room_id = path.lstrip("/ws/")
+    
+    # processor에 chat_room_id와 함께 websocket을 전달
+    await processor.process_audio_stream(websocket, chat_room_id)
 
 # WebSocket 서버 시작
 start_server = websockets.serve(handle_client, args.host, args.port)
