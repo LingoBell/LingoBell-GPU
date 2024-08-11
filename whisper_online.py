@@ -131,9 +131,9 @@ class FasterWhisperASR(ASRBase):
     def transcribe(self, audio, init_prompt=""):
 
         # tested: beam_size=5 is faster and better than 1 (on one 200 second document from En ESIC, min chunk 0.01)
-        segments, info = self.model.transcribe(audio, language=self.original_language, initial_prompt=init_prompt, beam_size=5, word_timestamps=True, condition_on_previous_text=True, **self.transcribe_kargs)
+        segments, info = self.model.transcribe(audio, language="ko", initial_prompt=init_prompt, beam_size=5, word_timestamps=True, condition_on_previous_text=True, **self.transcribe_kargs)
         #print(info)  # info contains language detection result
-
+        print("whisper_online.py안에서Faster whisper의 함수인 transcribe() 실행됨!")
         return list(segments)
 
     def ts_words(self, segments):
@@ -577,7 +577,7 @@ def asr_factory(args, logfile=sys.stderr):
         # Only for FasterWhisperASR and WhisperTimestampedASR
         size = args.model
         t = time.time()
-        logger.info(f"Loading Whisper {size} model for {args.lan}...")
+        logger.info(f"Loading Faster-Whisper {size} model for {args.lan}...")
         asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir)
         e = time.time()
         logger.info(f"done. It took {round(e-t,2)} seconds.")
