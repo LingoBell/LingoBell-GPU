@@ -5,6 +5,13 @@ import librosa
 from functools import lru_cache
 import time
 import logging
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 
 import io
@@ -167,6 +174,7 @@ class OpenaiApiASR(ASRBase):
         self.response_format = "verbose_json" 
         self.temperature = temperature
 
+        self.api_key = openai_api_key
         self.load_model()
 
         self.use_vad_opt = False
@@ -176,7 +184,7 @@ class OpenaiApiASR(ASRBase):
 
     def load_model(self, *args, **kwargs):
         from openai import OpenAI
-        self.client = OpenAI()
+        self.client = OpenAI(api_key=self.api_key)
 
         self.transcribed_seconds = 0  # for logging how many seconds were processed by API, to know the cost
         

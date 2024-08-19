@@ -10,6 +10,10 @@ import soundfile
 import requests
 import io
 from whisper_online import *
+import base64
+
+from openai import OpenAI
+openai_client = OpenAI(api_key=openai_api_key)
 
 # Logging 설정
 logging.basicConfig(level=logging.INFO)
@@ -52,10 +56,17 @@ class ServerProcessor:
     def __init__(self, online_asr_proc, min_chunk):
         self.online_asr_proc = online_asr_proc
         self.min_chunk = min_chunk
+        self.user_processors = {}
         self.last_end = None
+        
+    def get_or_create_processor(self, user_id, args):
+        if user_id not in self.user_processors:
+            asr, online = asr_factory(args)
+            self.user_processors[user_id] = online
+            self.last_end[user_id] = None
+        return self.user_processors[user_id]
 
     async def process_audio_stream(self, websocket, chat_room_id):
-        self.online_asr_proc.init()
         user_id = None
         while True:
             try:
@@ -65,68 +76,98 @@ class ServerProcessor:
                     try:
                         message = json.loads(data)
                         if message.get("type") == "language":
-                           user_id = message.get("userId")
-                           logger.info(f"Received userId: {user_id}")
-                           logger.info(f"Received language info: {message}")
-                           native_language = message.get("nativeLanguage")
-                           learning_languages = message.get("learningLanguages")
-                           logger.info(f"Native Language: {native_language}")
-                           logger.info(f"Learning Languages: {learning_languages}")
+                            user_id = message.get("userId")
+                            logger.info(f"Received userId: {user_id}")
+                            logger.info(f"Received language info: {message}")
+                            native_language = message.get("nativeLanguage")
+                            learning_languages = message.get("learningLanguages")
+                            logger.info(f"Native Language: {native_language}")
+                            logger.info(f"Learning Languages: {learning_languages}")
+                           
+                            processor = self.get_or_create_processor(user_id, args)
+                        elif message.get("type") == "audio":
+                            user_id = message.get("userId")
+                            audio_data = base64.b64decode(message.get("blob"))
+                            
+                            audio_wav_io = io.BytesIO(audio_data)
+                            audio_wav_io.seek(0)
+                            logger.info(f"Received audio data of size: {len(audio_data)} bytes")
+
+                            try:
+                                audio_data, _ = librosa.load(audio_wav_io, sr=SAMPLING_RATE, dtype=np.float32)
+                                processor = self.get_or_create_processor(user_id, args)
+                                processor.insert_audio_chunk(audio_data)
+                                o = processor.process_iter()
+                                print(f"process_iter의 반환 값: {o}")
+                                transcription = self.format_output_transcript(o, user_id)
+                                print("format_output_transcript 실행 되고 난 결과값인 transcription", transcription)
+
+                                if transcription is not None:
+                                    logger.info(f"Transcription for user {user_id}: {transcription}")
+                                    await websocket.send(transcription)
+                                    self.send_stt_to_backend(user_id, chat_room_id, transcription)
+                                    print("process_audio_stream에서 send_stt_to_backend 호출함")
+                                else:
+                                    print("transcription이 None이여서 send_stt_to_backend 호출되지 않음")
+                            except Exception as e:
+                                logger.error(f"Error processing audio stream: {str(e)}")
                     except json.JSONDecodeError:
                         logger.error("Received invalid JSON message")
-                else:
-                    if not data:
-                        logger.error("Received empty data, skipping processing")
-                        continue
-
-                    # 수신된 데이터를 wav 형식으로 처리
-                    audio_wav_io = io.BytesIO(data)
-                    audio_wav_io.seek(0)
-                    logger.info(f"Received audio data of size: {len(data)} bytes")
-
-                    try:
-                        # librosa로 오디오 데이터를 처리합니다.
-                        audio_data, _ = librosa.load(audio_wav_io, sr=SAMPLING_RATE, dtype=np.float32)
-                        self.online_asr_proc.insert_audio_chunk(audio_data)
-                        o = online.process_iter()
-                        transcription = self.format_output_transcript(o)
-                    
-                        if transcription and user_id:
-                            logger.info(f"Transcription for user {user_id}: {transcription}")
-                            await websocket.send(transcription)
-                            
-                            self.send_stt_to_backend(user_id, chat_room_id, transcription)
-                    except Exception as e:
-                        logger.error(f"Error processing audio stream: {str(e)}")
             except websockets.ConnectionClosed:
                 break
             except Exception as e:
                 logger.error(f"Error processing audio stream: {e}")
 
-    def format_output_transcript(self, o):
+    def format_output_transcript(self, o, user_id):
+        print(f"format_output_transcript이 아예 실행 되는지? o의 값: {o}")
+
+        if user_id is None:
+            print("user_id가 None입니다. 사용자 ID가 제대로 전달되었는지 확인하세요.")
+            return None
+
+        if self.last_end is None:
+            print("self.last_end이 초기화되지 않았습니다. 초기화합니다.")
+            self.last_end = {}
+
+        if user_id not in self.last_end:
+            print(f"🔍 Info: user_id {user_id}가 self.last_end에 존재하지 않습니다. 새로운 항목을 추가합니다.")
+            self.last_end[user_id] = None
+
         if o[0] is not None:
             beg, end = o[0] * 1000, o[1] * 1000
-            if self.last_end is not None:
-                beg = max(beg, self.last_end)
-            self.last_end = end
-            return json.dumps({"transcription": o[2]})
+            print(f"시작 시간(beg) = {beg}, 종료 시간(end) = {end}")
+
+            if self.last_end[user_id] is not None:
+                beg = max(beg, self.last_end[user_id])
+                print(f"last_end가 존재하여 beg 값이 조정되었습니다. 새로운 beg = {beg}")
+
+            self.last_end[user_id] = end
+            print(f"user_id {user_id}의 last_end가 {end}으로 업데이트되었습니다.")
+
+            transcription = o[2]
+            
+            return transcription
+        
+        print("o[0]이 None입니다. 처리할 수 없습니다.")
         return None
 
     def send_stt_to_backend(self, user_id, chat_room_id, transcription):
-       try:
-           payload = {
+        print("send_stt_to_backend가 실행이 되는지?")
+        try:
+            payload = {
                "userId": user_id,
                "chatRoomId": chat_room_id,
                "stt_text": transcription
            }
-           response = requests.post("http://127.0.0.1:8000/process_stt_and_translate", json=payload)
-           if response.status_code == 200:
-               logger.info(f"STT result successfully sent to backend for user {use_id} in chat room {chat_room_id}")
-           else:
+            response = requests.post("http://127.0.0.1:8000/api/chats/pst", json=payload)
+            print("백엔드 서버로 잘 보낼 준비가 된 response의 모양은? ", response)
+            if response.status_code == 200:
+               logger.info(f"STT result successfully sent to backend for user {user_id} in chat room {chat_room_id}")
+            else:
                logger.error(f"Failed to send STT result to backend: {response.status_code}")
-       
-       except Exception as e:
-           logger.error(f"Error sending STT result to backend: {e}")
+    
+        except Exception as e:
+            logger.error(f"Error sending STT result to backend: {e}")
 
 # WebSocket 서버 처리
 async def handle_client(websocket, path):
