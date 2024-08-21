@@ -102,9 +102,6 @@ class WhisperTimestampedASR(ASRBase):
     def set_translate_task(self):
         self.transcribe_kargs["task"] = "translate"
 
-
-
-
 class FasterWhisperASR(ASRBase):
     """Uses faster-whisper library as the backend. Works much faster, appx 4-times (in offline mode). For GPU, it requires installation with a specific CUDNN version.
     """
@@ -333,7 +330,7 @@ class OnlineASRProcessor:
         self.asr = asr
         self.tokenizer = tokenizer
         self.logfile = logfile
-
+    
         self.init()
 
         self.buffer_trimming_way, self.buffer_trimming_sec = buffer_trimming
@@ -345,9 +342,31 @@ class OnlineASRProcessor:
 
         self.transcript_buffer = HypothesisBuffer(logfile=self.logfile)
         self.commited = []
+        
+        self.silence_threshold = 0.5
+        self.min_silence_duration = 1.0
 
     def insert_audio_chunk(self, audio):
         self.audio_buffer = np.append(self.audio_buffer, audio)
+        
+    def detect_silence(self, audio):
+        energy = np.square(audio).mean()
+        return energy < self.silence_threshold
+    
+    def chunk_at_silence(self):
+        silence_positions = []
+        buffer_duration = len(self.audio_buffer) / self.SAMPLING_RATE
+
+        if buffer_duration > self.min_silence_duration:
+            for i in range(len(self.audio_buffer)):
+                if i % int(self.SAMPLING_RATE * self.min_silence_duration) == 0:
+                    chunk = self.audio_buffer[i:i + int(self.SAMPLING_RATE * self.min_silence_duration)]
+                    if self.detect_silence(chunk):
+                        silence_positions.append(i / self.SAMPLING_RATE)
+
+        if silence_positions:
+            chunk_at = silence_positions[-1] + self.buffer_time_offset
+            self.chunk_at(chunk_at)
 
     def prompt(self):
         """Returns a tuple: (prompt, context), where "prompt" is a 200-character suffix of commited text that is inside of the scrolled away part of audio buffer. 
@@ -373,7 +392,6 @@ class OnlineASRProcessor:
         Returns: a tuple (beg_timestamp, end_timestamp, "text"), or (None, None, ""). 
         The non-emty text is confirmed (committed) partial transcript.
         """
-
         prompt, non_prompt = self.prompt()
         logger.debug(f"PROMPT: {prompt}")
         logger.debug(f"CONTEXT: {non_prompt}")
@@ -397,24 +415,8 @@ class OnlineASRProcessor:
             if len(self.audio_buffer)/self.SAMPLING_RATE > self.buffer_trimming_sec:  # longer than this
                 self.chunk_completed_sentence()
 
-        
         if self.buffer_trimming_way == "segment":
-            s = self.buffer_trimming_sec  # trim the completed segments longer than s,
-        else:
-            s = 30 # if the audio buffer is longer than 30s, trim it
-        
-        if len(self.audio_buffer)/self.SAMPLING_RATE > s:
-            self.chunk_completed_segment(res)
-
-            # alternative: on any word
-            #l = self.buffer_time_offset + len(self.audio_buffer)/self.SAMPLING_RATE - 10
-            # let's find commited word that is less
-            #k = len(self.commited)-1
-            #while k>0 and self.commited[k][1] > l:
-            #    k -= 1
-            #t = self.commited[k][1] 
-            logger.debug("chunking segment")
-            #self.chunk_at(t)
+            self.chunk_at_silence()
 
         logger.debug(f"len of buffer now: {len(self.audio_buffer)/self.SAMPLING_RATE:2.2f}")
         return self.to_flush(o)
@@ -455,10 +457,6 @@ class OnlineASRProcessor:
                 logger.debug(f"--- last segment not within commited area")
         else:
             logger.debug(f"--- not enough segments to chunk")
-
-
-
-
 
     def chunk_at(self, time):
         """trims the hypothesis and audio buffer at "time"

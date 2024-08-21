@@ -38,6 +38,8 @@ set_logging(args, logger, other="")
 # Whisper 모델 초기 설정
 SAMPLING_RATE = 16000
 asr, online = asr_factory(args)
+if args.vad:
+    asr.use_vad()
 min_chunk = args.min_chunk_size
 
 # 초기 웜업 파일 처리
@@ -71,10 +73,10 @@ class ServerProcessor:
         while True:
             try:
                 data = await websocket.recv()
-
                 if isinstance(data, str):
                     try:
                         message = json.loads(data)
+                        
                         if message.get("type") == "language":
                             user_id = message.get("userId")
                             logger.info(f"Received userId: {user_id}")
@@ -83,8 +85,9 @@ class ServerProcessor:
                             learning_languages = message.get("learningLanguages")
                             logger.info(f"Native Language: {native_language}")
                             logger.info(f"Learning Languages: {learning_languages}")
-                           
+                        
                             processor = self.get_or_create_processor(user_id, args)
+                            
                         elif message.get("type") == "audio":
                             user_id = message.get("userId")
                             audio_data = base64.b64decode(message.get("blob"))
@@ -95,28 +98,38 @@ class ServerProcessor:
 
                             try:
                                 audio_data, _ = librosa.load(audio_wav_io, sr=SAMPLING_RATE, dtype=np.float32)
+
                                 processor = self.get_or_create_processor(user_id, args)
                                 processor.insert_audio_chunk(audio_data)
                                 o = processor.process_iter()
                                 print(f"process_iter의 반환 값: {o}")
+                                
                                 transcription = self.format_output_transcript(o, user_id)
                                 print("format_output_transcript 실행 되고 난 결과값인 transcription", transcription)
 
                                 if transcription is not None:
+                                    if isinstance(transcription, bytes):
+                                        transcription = transcription.decode('utf-8')
                                     logger.info(f"Transcription for user {user_id}: {transcription}")
-                                    await websocket.send(transcription)
+                                    
+                                    # 타입 확인 후 WebSocket으로 전송
+                                    if isinstance(transcription, str):
+                                        await websocket.send(transcription)
+                                    else:
+                                        logger.error("Transcription is not a string, cannot send via WebSocket.")
+
                                     self.send_stt_to_backend(user_id, chat_room_id, transcription)
-                                    print("process_audio_stream에서 send_stt_to_backend 호출함")
+                                    print("🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥process_audio_stream에서 send_stt_to_backend 호출함🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥")
                                 else:
                                     print("transcription이 None이여서 send_stt_to_backend 호출되지 않음")
                             except Exception as e:
-                                logger.error(f"Error processing audio stream: {str(e)}")
-                    except json.JSONDecodeError:
-                        logger.error("Received invalid JSON message")
+                                logger.error(f"여기에서 걸림. 가장 안쪽에서 에러: {str(e)}")
+                    except Exception as e:
+                        logger.error(f"중간에서 걸림. 중간에서 에러 발생: {e}")
             except websockets.ConnectionClosed:
                 break
             except Exception as e:
-                logger.error(f"Error processing audio stream: {e}")
+                logger.error(f"가장 바깥에서 걸림. 바깥에서 에러 발생: {e}")
 
     def format_output_transcript(self, o, user_id):
         print(f"format_output_transcript이 아예 실행 되는지? o의 값: {o}")
